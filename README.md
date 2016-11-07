@@ -60,7 +60,7 @@ $es->index("store")
 
 4. 批量update 和 insert 商店中的书籍信息（组合_id键）
 ```php
-// 'id','store_id' 一起成为一个为意见
+// 'id','store_id' 一起成为一个唯一键
 $data = [
 	["id" => 1, "store_id"=>1, "name" => "Elastic Search 中文指南", "author" => "king"],
 	["id" => 1, "store_id"=>2, "name" => "Elastic Search 进阶", "author" => "adom"],
