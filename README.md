@@ -71,3 +71,12 @@ $es->index("store)
 ->type("books")
 ->bulk_upsert($data, ["id", "store_id"]);
 ```
+
+5. 获取商店中所有书名
+```php
+$es = new ES;
+$es->index("store")
+->type("books")
+->select("name as book_name")
+->search();
+```
