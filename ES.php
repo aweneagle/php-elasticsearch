@@ -584,8 +584,8 @@ class ES
         }
         $res = curl_exec($ch);
         if ($res === false) {
-            curl_close($ch);
             $this->error = "failed curl_exec($url). error:" . curl_error($ch);
+            curl_close($ch);
             return false;
         }
         curl_close($ch);
