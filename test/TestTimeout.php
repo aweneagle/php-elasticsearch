@@ -14,6 +14,7 @@ class TestTimeout extends TestCase
 			["id" => 3, "name" => "awen2", "age" => 14],
 			["id" => 4, "name" => "awen3", "age" => 15],
 		];
+        return ;
 		// prepare data
 		$es->index("fortest")->type("fortest")->bulk_upsert($data, "id");
 		$es->bulk_upsert($data, "id");

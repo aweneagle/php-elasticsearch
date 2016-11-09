@@ -36,6 +36,14 @@ namespace App\Lib;
 
 class ES
 {
+    const INDEX_EXISTS = 1;
+    const INDEX_NOT_EXISTS = 0;
+    const INDEX_UNKNOWN = -1;
+
+    private static $meta_fields = [
+        "_score", "_index", "_type", "_id", "_source"
+    ];
+
     public $host = '127.0.0.1';
     public $port = 9200;
     public $timeout_ms = 0;    //curl函数超时时间，单位是毫秒, <= 0 表示不超时
@@ -50,6 +58,8 @@ class ES
     private $from = 0;   //默认从第一条开始
 
     private $_source = [];    //需要选取的字段
+    private $meta = [];       //需要选取的元字段, 例如 _id, _score, _source 等
+    private $no_select = true;
 
     private $query = [];
     private $sort = [];
@@ -61,6 +71,9 @@ class ES
     private $context = null;   
     private $context_level = 0;
 
+    /* ES请求的http返回码 */
+    private $status = null;
+
 
     public function __construct($conf = null)
     {
@@ -69,6 +82,14 @@ class ES
             $this->port = $conf['port'];
             $this->index = $conf['index'];
         }
+    }
+
+    /* 
+     * get_index_name() 获取索引名
+     */
+    public function get_index_name()
+    {
+        return $this->index;
     }
 
     /*
@@ -134,17 +155,147 @@ class ES
      */
     public function select_multi(array $fields)
     {
+        if (!empty($fields)) {
+            $this->no_select = false;
+        }
         foreach ($fields as $f) {
             if (is_string($f)) {
-                if (preg_match('/^([\w\.]+)\s+as\s+(\w+)$/i', $f, $match)) {
-                    $this->_source[$match[1]][] = $match[2];
+                if (!preg_match('/^([\w_.-]+)\s+as\s+([^\s]+)$/', $f, $farr)) {
+                    $field = $f;
+                    $alias = $f;
                 } else {
-                    $this->_source[$f][] = $f;
+                    $field = $farr[1];
+                    $alias = $farr[2];
+                }
+
+                if (in_array($field, self::$meta_fields)) {
+                    $this->meta[$field][] = $alias;
+                } else {
+                    $this->_source[$field][] = $alias;
                 }
             }
         }
         return $this;
     }
+
+    /* 
+     * index_exists() 判断是否存在该index
+     *
+     * @return  1, 存在;  0 不存在; -1 请求失败, 调用 error() 查看错误信息
+     */
+    public function index_exists()
+    {
+        $res = $this->mapping();
+        if ($res === false) {
+            if ($this->status != null) {
+                return 0;
+            } else {
+                return -1;
+            }
+        }
+        return 1;
+    }
+
+    /*
+     * create()  创建索引
+     */
+    public function create($mappings = []) {
+        $url = $this->build_url("");
+        $res = $this->curl($url, "PUT");
+        if ($res === false) {
+            return false;
+        }
+        $res = json_decode($res, true);
+        if (isset($res['error'])) {
+            $this->set_error(json_encode($res));
+            $this->status = $res['status'];
+            return false;
+        } else {
+            $this->status = 200;
+        }
+
+        return $res;
+    }
+
+    /*
+     * drop() 删除整个索引
+     */
+    public function drop_index()
+    {
+        $url = $this->build_url("");
+        $res = $this->curl($url, "DELETE");
+        if ($res === false) {
+            return false;
+        }
+        $res = json_decode($res, true);
+        if (isset($res['error'])) {
+            $this->set_error(json_encode($res));
+            $this->status = $res['status'];
+            return false;
+        } else {
+            $this->status = 200;
+        }
+        return $res;
+    }
+
+    /*
+     * mapping() 获取/设置 mapping
+     *
+     * @param   $mapping, 需要设置的mapping
+     * @return  $mapping
+     */
+    public function mapping(array $mappings = [])
+    {
+        $url = $this->build_url("_mapping");
+        if ($mappings) {
+            foreach ($mappings as $type => $map) {
+                $properties = [];
+                foreach ($map as $field => $data_type) {
+                    $this->put_deep_element(
+                        $properties['properties'],
+                        explode('.', $field), 
+                        $this->get_type_mapping($data_type)
+                    );
+                }
+                $this->curl($url . "/" . $type, "PUT", json_encode($properties));
+            }
+        }
+        $res = $this->curl($url, "GET");
+        if ($res === false) {
+            return false;
+        }
+        $res = json_decode($res, true);
+        if (isset($res['status'])) {
+            $this->status = $res['status'];
+            $this->set_error(json_encode($res));
+            return false;
+        } else {
+            $this->status = 200;
+        }
+        return $res;
+    }
+
+    /*
+     * alias() 创建别名
+     *
+     * @param   $alias, string, 别名
+     */
+    public function alias($alias)
+    {
+        $url = $this->build_url("_alias") . "/" . $alias;
+        $res = $this->curl($url, "PUT", '');
+        if ($res === false) {
+            return false;
+        }
+        $res = json_decode($res, true);
+        if (isset($res['error'])) {
+            $this->set_error(json_encode($res['error']));
+            return false;
+        } else {
+            return true;
+        }
+    }
+
 
     /*
      * count() 统计符合条件的文档数量
@@ -524,10 +675,13 @@ class ES
 
     private function clean_query()
     {
-        $this->query = $this->filter = $this->sort = [];
-        $this->cache = [];
+        $this->query = $this->filter = $this->sort = $this->cache = [];
         $this->context = null;
         $this->context_level = 0;
+        $this->_source = $this->meta = [];
+        $this->no_select = true;
+        $this->from = $this->size = 0;
+        $this->status = null;
     }
 
     private function before($bool)
@@ -557,7 +711,7 @@ class ES
 
     }
 
-    private function curl($url, $method, $post_fields)
+    private function curl($url, $method, $post_fields=null)
     {
         $ch = curl_init($url);
         if (!$ch) {
@@ -568,7 +722,9 @@ class ES
             CURLOPT_RETURNTRANSFER => 1,
         ];
         $this->set_method($curl_options, $method);
-        $curl_options[CURLOPT_POSTFIELDS] = $post_fields;
+        if ($post_fields) {
+            $curl_options[CURLOPT_POSTFIELDS] = $post_fields;
+        }
         $conn_timeout_ms = intval($this->conntimeout_ms);
         $timeout_ms = intval($this->timeout_ms);
         if ($conn_timeout_ms > 0) {
@@ -619,13 +775,31 @@ class ES
         if (isset($data['hits']['hits'])) {
             foreach ($data['hits']['hits'] as $d) {
                 $row = $d['_source'];
+
+                if ($this->no_select) {
+                    $return[] = $row;
+                    continue;
+                }
+
                 $new_row = [];
-                foreach ($this->_source as $key => $alias) {
-                    foreach ($alias as $rename) {
-                        if (false === strpos($key, ".")) {
-                            $new_row[$rename] = $d['_source'][$key];
+                if (!empty($this->meta)) {
+                    foreach ($this->meta as $key => $alias) {
+                        if (isset($d[$key])) {
+                            $val = $d[$key];
                         } else {
-                            $new_row[$rename] = $this->fetch_deep_element($d['_source'], explode(".", $key));
+                            $val = false;
+                        }
+                        foreach ($alias as $a) {
+                            $new_row[$a] = $val;
+                        }
+                    }
+                }
+
+                if (!empty($this->_source)) {
+                    foreach ($this->_source as $key => $alias) {
+                        $val = $this->fetch_deep_element($d['_source'], explode(".", $key));
+                        foreach ($alias as $rename) {
+                            $new_row[$rename] = $val;
                         }
                     }
                 }
@@ -659,7 +833,7 @@ class ES
         return $post_fields;
     }
 
-    private function build_url($operation)
+    public function build_url($operation)
     {
         $path = '';
         if ($this->index) {
@@ -679,8 +853,15 @@ class ES
 
         $head = "http://" . $this->host . ":" . $this->port . "/" ;
         switch ($operation) {
+        case "":
+            return $head . $this->index;
+
         case "_bulk":
             return $head . $operation;
+
+        case "_mapping":
+        case "_alias":
+            return $head . $this->index . "/" . $operation;
 
         case "_count":
         case "_search":
@@ -733,5 +914,41 @@ class ES
             $_id[] = $row[$key];
         }
         return implode(".", $_id);
+    }
+
+    private function put_deep_element(&$array, array $keys, $val)
+    {
+        $k = array_shift($keys);
+        if (!isset($array[$k])) {
+            $array[$k] = [];
+        }
+        if (empty($keys)) {
+            $array[$k] = $val;
+        } else {
+            $this->put_deep_element($array[$k], $keys, $val);
+        }
+    }
+
+    private function get_type_mapping($data_type)
+    {
+        switch ($data_type) {
+        case 'string':
+            return ["type" => "string", "index" => "not_analyzed"];
+
+        case 'long':
+            return ['type' => 'long'];
+
+        case 'integer':
+            return ['type' => 'integer'];
+
+        case 'bool':
+            return ['type' => 'bool'];
+
+        case 'nested':
+            return ['type' => 'nested'];
+
+        default:
+            return $data_type;
+        }
     }
 }
