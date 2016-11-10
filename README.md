@@ -80,3 +80,34 @@ $es->index("store")
 ->select("name as book_name")
 ->search();
 ```
+
+6. nested query
+```php
+$es = new ES;
+$data = [
+	[
+		"id" => 1, 
+		"tags" => [
+			["name" => "tech", "type" => 1],
+			["name" => "manual", "type" => 2],
+			["name" => "chinese", "type" => 3],
+		], 
+		"name" => "Elasticsearch 中文指南",
+	],
+	[
+		"id" => 2, 
+		"tags" => [
+			["name" => "tech", "type" => 1],
+			["name" => "manual", "type" => 2],
+			["name" => "english", "type" => 3],
+		], 
+		"name" => "Elasticsearch manual",
+	],
+];
+$es->index("store")->type("books")
+->bulk_upsert($data, "id");
+
+$es->nested("tags", function($es) {
+	$es->where("tags.name", "=", "tech");
+	$es->where("tags.type", "=", "2");
+});
