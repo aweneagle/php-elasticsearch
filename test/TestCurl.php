@@ -156,6 +156,25 @@ class ESTestCurl extends TestCase
         sleep(1);
 
         $es->type("fortest")
+            ->select("id", "name", "detail.addr as myaddr")
+           ->nested("detail", function($es) {
+               $es->must(function($es) {
+                   $es->where("detail.code", ">=", "211");
+               });
+           });
+        $count = $es->count();
+        $data = $es->search();
+
+        $this->assertEquals($count, 2);
+        $this->assertEquals(count($data), 4);
+        $this->assertEquals($data, [
+            ["id" => 2, "name" => "awen1", "myaddr" => "china"],
+            ["id" => 2, "name" => "awen1", "myaddr" => "china"],
+            ["id" => 1, "name" => "awen1", "myaddr" => "china"],
+            ["id" => 1, "name" => "awen1", "myaddr" => "china"],
+        ]);
+
+        $es->type("fortest")
             ->select("id", "name", "detail.code as code", "detail.addr as myaddr")
            ->nested("detail", function($es) {
                $es->must(function($es) {

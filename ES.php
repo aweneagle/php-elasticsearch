@@ -77,6 +77,8 @@ class ES
     /* ES请求的http返回码 */
     private $status = null;
     private $nested_path = [];
+    /* 这些key不返回给user */
+    private $no_return_fields = [];
 
 
     public function __construct($conf = null)
@@ -176,6 +178,7 @@ class ES
                     $this->meta[$field][] = $alias;
                 } else {
                     $this->_source[$field][] = $alias;
+                    unset($this->no_return_fields[$field]);
                 }
             }
         }
@@ -499,6 +502,13 @@ class ES
         if ($info = $this->parse_nested_path($field)) {
             list($nested_path, $nested_field) = array_values($info);
             $this->set_nested($nested_path, "where", ["op" => $op, "val" => $value, "field" => $nested_field]);
+
+            /* _source[] 为空 或者 _source[] 中有该字段时，需要返回给调用者 */
+            if (!empty($this->_source) && !isset($this->_source[$field])) {
+                $this->no_return_fields[$field] = true;
+            } else {
+                unset($this->no_return_fields[$field]);
+            }
         }
         $this->switch_to_context("filter");
         $this->wrap_bool("must");
@@ -658,6 +668,9 @@ class ES
         }
         if (!empty($this->_source)) {
             $query['_source'] = array_keys($this->_source);
+            if ($this->no_return_fields) {
+                $query['_source'] = array_merge($query['_source'], array_keys($this->no_return_fields));
+            }
         }
         return $query;
     }
@@ -857,7 +870,9 @@ class ES
                     foreach ($this->_source as $key => $alias) {
                         $val = $this->fetch_deep_element($d['_source'], explode(".", $key));
                         foreach ($alias as $rename) {
-                            $new_row[$rename] = $val;
+                            if (!isset($this->no_return_fields[$key])) {
+                                $new_row[$rename] = $val;
+                            }
                         }
                     }
                 }
