@@ -477,7 +477,7 @@ class ES
     private function parse_nested_path($field)
     {
         foreach ($this->nested_path as $path => $null) {
-            if (strpos($field, $path) == 0) {
+            if (strpos($field, $path) === 0) {
                 return [
                     "path" => $path,
                     "field" => substr($field, strlen($path) + 1)
