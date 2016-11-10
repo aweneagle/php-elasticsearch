@@ -69,10 +69,14 @@ class ES
     //标记当前的 must/should/must_not 所处的上下文
     //null 为初始化, "*" 为未知, "filter", "query" 分别对应过滤和查询
     private $context = null;   
-    private $context_level = 0;
+
+    private $curr_bool = [];
+
+    private $bool_stack = [];
 
     /* ES请求的http返回码 */
     private $status = null;
+    private $nested_path = [];
 
 
     public function __construct($conf = null)
@@ -387,17 +391,45 @@ class ES
         ];
     }
 
+    /* 
+     * nested() 对应 ES 的 nested query
+     *
+     * @param   $path, nested 的 path
+     * @param   $func, 原型为 function(Es $es)
+     * @return  $this
+     */
+    public function nested($path, \Closure $func)
+    {
+        $this->set_nested($path);
+        $this->push_bool();
+        $func($this);
+        $nested = [
+            "nested" => [
+                "path" => $path,
+                $this->context => $this->curr_bool,
+            ],
+        ];
+        $this->pop_bool($nested);
+        return $this;
+    }
+
     /*
      * must() 对应 ES 的must查询语句, 相当于逻辑 AND
      *
      * @param   $func, 原型为 function(Es $es)
-     * @return  null;
+     * @return  $this;
      */
     public function must(\Closure $func)
     {
-        $this->before("must");
+        /* push some pre-operations into stack*/
+        $this->push_bool();
         $func($this);
-        $this->after();
+        $must = [
+            "bool" => [
+                "must" => $this->curr_bool,
+            ],
+        ];
+        $this->pop_bool($must);
         return $this;
     }
 
@@ -405,13 +437,18 @@ class ES
      * should() 对应 ES 的should查询语句, 相当于逻辑 OR
      *
      * @param   $func, 原型为 function(Es $es)
-     * @return  null;
+     * @return  $this;
      */
     public function should(\Closure $func)
     {
-        $this->before("should");
+        $this->push_bool();
         $func($this);
-        $this->after();
+        $should = [
+            "bool" => [
+                "should" => $this->curr_bool,
+            ],
+        ];
+        $this->pop_bool($should);
         return $this;
     }
 
@@ -419,14 +456,32 @@ class ES
      * must_not() 对应 ES 的must_not查询语句, 相当于逻辑 AND NOT
      *
      * @param   $func, 原型为 function(Es $es)
-     * @return  null;
+     * @return  $this;
      */
     public function must_not(\Closure $func)
     {
-        $this->before("must_not");
+        $this->push_bool();
         $func($this);
-        $this->after();
+        $must_not = [
+            "bool" => [
+                "must_not" => $this->curr_bool,
+            ],
+        ];
+        $this->pop_bool($must_not);
         return $this;
+    }
+
+    private function parse_nested_path($field)
+    {
+        foreach ($this->nested_path as $path => $null) {
+            if (strpos($field, $path) == 0) {
+                return [
+                    "path" => $path,
+                    "field" => substr($field, strlen($path) + 1)
+                ];
+            }
+        }
+        return false;
     }
 
     /*
@@ -441,8 +496,12 @@ class ES
      */
     public function where($field, $op, $value)
     {
-        $this->try_to_switch_context("filter", "must");
-        $this->try_to_push_context("filter", "where");
+        if ($info = $this->parse_nested_path($field)) {
+            list($nested_path, $nested_field) = array_values($info);
+            $this->set_nested($nested_path, "where", ["op" => $op, "val" => $value, "field" => $nested_field]);
+        }
+        $this->switch_to_context("filter");
+        $this->wrap_bool("must");
         $filter = [];
         switch ($op) {
         case "=":
@@ -488,8 +547,7 @@ class ES
             throw new \Exception(" unknown operation '$op'");
 
         }
-        $this->cache[] = $filter;
-        $this->pop_context();
+        $this->curr_bool[] = $filter;
         return $this;
     }
 
@@ -501,15 +559,14 @@ class ES
      */
     public function exists($field, $exists = true)
     {
-        $this->try_to_switch_context("filter", "must");
-        $this->try_to_push_context("filter", "exists");
+        $this->switch_to_context("filter");
+        $this->wrap_bool("must");
         if ($exists) {
             $filter = ["exists" => ["field" => $field]];
         } else {
             $filter = ["missing" => ["field" => $field]];
         }
-        $this->cache[] = $filter;
-        $this->pop_context();
+        $this->curr_bool[] = $filter;
         return $this;
     }
 
@@ -522,8 +579,8 @@ class ES
      */
     public function match($field, $keywords, $boost = 1)
     {
-        $this->try_to_switch_context("query", "should");
-        $this->try_to_push_context("query", "match");
+        $this->switch_to_context("query");
+        $this->wrap_bool("should");
         if ($boost == 1) {
             $condition = $keywords;
         } else {
@@ -532,8 +589,7 @@ class ES
         $query = [
             "match" => [$field => $condition]
         ];
-        $this->cache[] = $query;
-        $this->pop_context();
+        $this->curr_bool[] = $query;
         return $this;
     }
 
@@ -561,13 +617,15 @@ class ES
         return $this;
     }
 
-
     /*
      * to_query() 返回query数据，用于debug
      */
     public function to_query()
     {
-        $this->after();
+        if (!empty($this->curr_bool)) {
+            $this->unwrap_bool();
+        }
+
         $query = [];
         if (!empty($this->query)) {
             if (!empty($this->filter)) {
@@ -604,111 +662,15 @@ class ES
         return $query;
     }
 
-    private function try_to_push_context($tag, $func_name)
-    {
-        if ($this->context != "*" && $this->context != null) {
-            if ($tag != "*" && $tag != $this->context) {
-                throw new \Exception("could not call $func_name() in a $this->context context");
-            }
-        }
-        if ($this->context == "*" || $this->context == null) {
-            $this->context = $tag;
-        }
-        $this->context_level += 1;
-    }
-
-    private function build_query_from_cache(array &$cache)
-    {
-        $query = [];
-        while (!empty($cache)) {
-            $op = array_shift($cache);
-            if (in_array($op, ["must", "must_not", "should"])) {
-                $query[] = ["bool" => [$op => $this->build_query_from_cache($cache)]];
-            } elseif ($op == "end") {
-                return $query;
-            } else {
-                $query[] = $op;
-            } 
-        }
-        if (empty($query)) {
-            return [];
-        }
-        return $query[0];
-    }
-
-    private function merge_bool($merge_from, $merge_into)
-    {
-        if (isset($merge_from['bool'])) {
-            foreach ($merge_from['bool'] as $bool => $info) {
-                if (!isset($merge_into['bool'][$bool])) {
-                    $merge_into['bool'][$bool] = [];
-                }
-                $merge_into['bool'][$bool] = array_merge($merge_into['bool'][$bool], $info);
-            }
-        }
-        return $merge_into;
-    }
-
-    private function pop_context()
-    {
-        $this->context_level -= 1;
-        if ($this->context_level == 0) {
-            switch ($this->context) {
-            case "query":
-                $this->query = $this->merge_bool(
-                    $this->build_query_from_cache($this->cache), 
-                    $this->query
-                );
-                break;
-
-            case "filter":
-                $this->filter = $this->merge_bool(
-                    $this->build_query_from_cache($this->cache, $this->filter),
-                    $this->filter
-                );
-                break;
-            }
-
-            $this->context = null;
-        }
-    }
-
     private function clean_query()
     {
         $this->query = $this->filter = $this->sort = $this->cache = [];
         $this->context = null;
-        $this->context_level = 0;
         $this->_source = $this->meta = [];
         $this->no_select = true;
         $this->from = $this->size = 0;
         $this->status = null;
-    }
-
-    private function before($bool)
-    {
-        $this->try_to_push_context("*", $bool);
-        $this->cache[] = $bool;
-    }
-
-    private function after()
-    {
-        if ($this->context_level) {
-            $this->cache[] = "end";
-            $this->pop_context();
-        }
-    }
-
-    private function try_to_switch_context($to_context, $bool)
-    {
-        $curr_ctx = $this->context;
-        if ($curr_ctx != "*" && $curr_ctx != $to_context && $curr_ctx != null) {
-            $this->after();
-            $this->before($bool);
-        }
-        if ($curr_ctx == null) {
-            $this->before($bool);
-        }
-
+        $this->nested_path = $this->bool_stack = $this->curr_bool = [];
     }
 
     private function curl($url, $method, $post_fields=null)
@@ -769,10 +731,106 @@ class ES
         return false;
     }
 
+    /* unpack_nested() 将nested结构的数据打散成扁平状
+     */
+    private function unpack_nested_data($data)
+    {
+        $result = [];
+        $tmp = $data;
+        foreach ($data as $key => $element) {
+            if ($this->is_nested_path($key) && is_array($element)) {
+                $where = $this->get_nested($key, "where");
+                foreach ($element as $e) {
+                    if (!$where || $this->nested_compare($where, $e)) {
+                        $tmp[$key] = $e;
+                        $result[] = $tmp;
+                    }
+                }
+            }
+        }
+        if (!$result) {
+            return [$data];
+        } else {
+            return $result;
+        }
+    
+    }
+
+    private function nested_compare($where, $element)
+    { 
+        foreach ($where as $w) {
+            $res = $this->nested_compare_op($w, $element);
+            if (!$res) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private function nested_compare_op($where_op, $element)
+    {
+        $field = $where_op['field'];
+        if (!isset($element[$field])) {
+            return false;
+        }
+        $val = $element[$field];
+
+        switch ($where_op['op']) {
+        case '=':
+            return $val == $where_op['val'];
+        case 'in':
+            return in_array($val, $where_op['val']);
+        case '>':
+            return $val > $where_op['val'];
+        case '<':
+            return $val < $where_op['val'];
+        case '>=':
+            return $val >= $where_op['val'];
+        case '<=':
+            return $val <= $where_op['val'];
+        }
+        return false;
+    }
+
+    private function get_nested($path, $tag)
+    {
+        if (isset($this->nested_path[$path][$tag])) {
+            return $this->nested_path[$path][$tag];
+        }
+    }
+
+    private function set_nested($path, $tag = null, $op = null)
+    {
+        if (!isset($this->nested_path[$path])) {
+            $this->nested_path[$path] = [];
+        }
+        switch ($tag) {
+        case "where":
+            $this->nested_path[$path]['where'][] = $op;
+            break;
+        default:
+            break;
+        }
+    }
+
+    private function is_nested_path($path)
+    {
+        return isset($this->nested_path[$path]);
+    }
+
     private function format_output($data)
     {
         $return = [];
         if (isset($data['hits']['hits'])) {
+            $hits = [];
+            foreach ($data['hits']['hits'] as $d) {
+                $d_sources = $this->unpack_nested_data($d['_source']);
+                foreach ($d_sources as $source) {
+                    $d['_source'] = $source;
+                    $hits[] = $d;
+                }
+            }
+            $data['hits']['hits'] = $hits;
             foreach ($data['hits']['hits'] as $d) {
                 $row = $d['_source'];
 
@@ -833,7 +891,7 @@ class ES
         return $post_fields;
     }
 
-    public function build_url($operation)
+    private function build_url($operation)
     {
         $path = '';
         if ($this->index) {
@@ -872,6 +930,10 @@ class ES
     private function fetch_result(array $result, $operation, $code, $equal = true)
     {
         $return = [];
+        if (isset($result['error'])) {
+            $this->set_error(json_encode($result));
+            return $return;
+        }
         foreach ($result['items'] as $r) {
             if ($equal) {
                 $check = ($r[$operation]['status'] == $code);
@@ -950,5 +1012,92 @@ class ES
         default:
             return $data_type;
         }
+    }
+
+    private function pop_bool($bool_query)
+    {
+        $pre_bools = array_pop($this->bool_stack);
+        if ($pre_bools) {
+            $query = array_merge($pre_bools['op'], [$bool_query]);
+        } else {
+            $query = [$bool_query];
+        }
+        
+        if (empty($this->bool_stack)) {
+            switch ($this->context) {
+            case "query":
+                $this->query = $this->merge_bool($query[0], $this->query);
+                break;
+
+            case "filter":
+                $this->filter = $this->merge_bool($query[0], $this->filter);
+                break;
+
+            default:
+                throw new \Exception("wrong context : '{$this->context}'");
+            }
+            $this->curr_bool = [];
+        } else {
+            $this->curr_bool = $query;
+        }
+    }
+
+    private function wrap_bool($bool, $force = false)
+    {
+        /* 当最外层嵌套没有时，需要自动加上(例如直接调用 (new ES)->where(..)->where(..) */
+        if (empty($this->bool_stack)) {
+            $this->push_bool($bool);
+        }
+    }
+
+    private function push_bool($bool = null)
+    {
+        $this->bool_stack[] = ['bool' => $bool, 'context' => $this->context, 'op' => $this->curr_bool];
+        $this->curr_bool = [];
+    }
+
+    private function merge_bool($merge_from, $merge_into)
+    {
+        if (isset($merge_from['bool'])) {
+            foreach ($merge_from['bool'] as $bool => $info) {
+                if (!isset($merge_into['bool'][$bool])) {
+                    $merge_into['bool'][$bool] = [];
+                }
+                $merge_into['bool'][$bool] = array_merge($merge_into['bool'][$bool], $info);
+            }
+        } elseif (isset($merge_from['nested'])) {
+            $merge_into = array_merge($merge_into, $merge_from);
+        }
+        return $merge_into;
+    }
+
+    private function switch_to_context($context)
+    {
+        switch ($this->context) {
+        case null:
+            $this->context = $context;
+            break;
+
+        case "query":
+        case "filter":
+            $this->context = $context;
+            break;
+        }
+    }
+
+    private function unwrap_bool()
+    {
+        if (empty($this->bool_stack)) {
+            return;
+        }
+        $bool_info = array_pop($this->bool_stack);
+        $bool = $bool_info['bool'];
+        array_push($this->bool_stack, $bool_info);
+        $query = [
+            "bool" => [
+                $bool => $this->curr_bool
+            ]
+        ];
+        $this->pop_bool($query);
     }
 }

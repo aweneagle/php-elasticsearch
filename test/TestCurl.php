@@ -130,6 +130,76 @@ class ESTestCurl extends TestCase
 
 		$this->assertEquals($row[0]["_id"], "1.awen");
 
+        $es->drop_index();
+        $es->create();
+        $es->mapping(["fortest" => [
+            "detail" => "nested"
+        ]]);
+		$data = [
+            ["id" => 1, "name" => "awen", "age" => 2, "detail" => [
+                ["addr" => "china", "code" => 110],
+                ["addr" => "china", "code" => 111],
+                ["addr" => "china", "code" => 112],
+                ["addr" => "china", "code" => 113],
+            ]],
+            ["id" => 2, "name" => "awen1", "age" => 13, "detail" => [
+                ["addr" => "china", "code" => 211],
+                ["addr" => "china", "code" => 212],
+            ]],
+			["id" => 2, "name" => "awen2", "age" => 14],
+            ["id" => 1, "name" => "awen1", "age" => 15, "detail" => [
+                ["addr" => "china", "code" => 311],
+                ["addr" => "china", "code" => 312],
+            ]],
+		];
+		$es->type("fortest")->bulk_upsert($data, ["id", "name"]);
+        sleep(1);
+
+        $es->type("fortest")
+            ->select("id", "name", "detail.code as code", "detail.addr as myaddr")
+           ->nested("detail", function($es) {
+               $es->must(function($es) {
+                   $es->where("detail.code", ">=", "211");
+               });
+           });
+        $count = $es->count();
+        $data = $es->search();
+
+        $this->assertEquals($count, 2);
+        $this->assertEquals(count($data), 4);
+        $this->assertEquals($data, [
+            ["id" => 2, "name" => "awen1", "myaddr" => "china", "code" => 211],
+            ["id" => 2, "name" => "awen1", "myaddr" => "china", "code" => 212],
+            ["id" => 1, "name" => "awen1", "myaddr" => "china", "code" => 311],
+            ["id" => 1, "name" => "awen1", "myaddr" => "china", "code" => 312],
+        ]);
+
+        $es->type("fortest")
+            ->where("id", "=", 2)
+           ->nested("detail", function($es) {
+               $es->must(function($es) {
+                   $es->where("detail.addr", "=", "china");
+               });
+           });
+        $count = $es->count();
+        $data = $es->search();
+
+        $this->assertEquals($count, 1);
+        $this->assertEquals(count($data), 2);
+
+        $es->type("fortest")
+            ->where("id", "=", 1)
+           ->nested("detail", function($es) {
+               $es->must(function($es) {
+                   $es->where("detail.addr", "=", "china");
+                   $es->where("detail.code", "in", [311, 111]);
+               });
+           });
+        $count = $es->count();
+        $data = $es->search();
+
+        $this->assertEquals($count, 2);
+        $this->assertEquals(count($data), 2);
 
 	}
 

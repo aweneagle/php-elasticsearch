@@ -6,6 +6,55 @@ class ESTest extends TestCase
 {
 	public function testDefault()
 	{
+        /* nested query */
+        $es = new ES;
+        $query = $es->nested("names", function($es) {
+            $es->should(function($es) {
+                $es->match("names.first", "Smith");
+                $es->match("names.last", "David");
+            });
+        })->to_query();
+        $this->assertEquals($query, [
+            "query" => [
+                "nested" => [
+                    "path" => "names",
+                    "query" => [
+                        ["bool" => [
+                            "should" => [
+                                ["match" => ["names.first" => "Smith"]],
+                                ["match" => ["names.last" => "David"]],
+                            ],
+                        ],
+                        ]
+                    ],
+                ],
+            ],
+        ]);
+
+        $es = new ES;
+        $query = $es->nested("names", function($es) {
+            $es->should(function ($es) {
+                $es->where("names.first", "=", "Smith");
+                $es->where("names.last", "=", "David");
+            });
+        })->to_query();
+        $this->assertEquals($query, [
+            "filter" => [
+                "nested" => [
+                    "path" => "names",
+                    "filter" => [
+                        ["bool" => [
+                            "should" => [
+                                ["term" => ["names.first" => "Smith"]],
+                                ["term" => ["names.last" => "David"]],
+                            ],
+                        ],
+                        ]
+                    ],
+                ],
+            ],
+        ]);
+
         $es = new ES;
 		$query = $es->to_query();
 		$this->assertEquals($query, [
@@ -38,77 +87,43 @@ class ESTest extends TestCase
         $query2 = $es->to_query();
         $this->assertEquals($query1, $query2);
 
-        /* where 和 match 并存*/
-        $es = new ES;
-		$es->where("age", ">=", 2);
-        $es->match("name", "es");
-        $query1 = $es->to_query();
+        ///* where 和 match 并存*/
+        //$es = new ES;
+		//$es->where("age", ">=", 2);
+        //$es->match("name", "es");
+        //$query1 = $es->to_query();
 
-        $es = new ES;
-        $es->must(function($es) {
-            $es->where("age", ">=", 2);
-        });
-        $es->should(function($es) {
-            $es->match("name", "es");
-        });
-        $query2 = $es->to_query();
-        $this->assertEquals($query1, $query2);
+        //$es = new ES;
+        //$es->must(function($es) {
+        //    $es->where("age", ">=", 2);
+        //});
+        //$es->must(function($es) {
+        //    $es->match("name", "es");
+        //});
+        //$query2 = $es->to_query();
 
-
-        /* where 和 match 并存*/
-        $es = new ES;
-        $es->match("name", "es")
-		   ->where("age", ">=", 2);
-        $query1 = $es->to_query();
-
-        $es = new ES;
-        $es->should(function($es) {
-            $es->match("name", "es");
-        });
-        $es->must(function($es) {
-            $es->where("age", ">=", 2);
-        });
-        $query2 = $es->to_query();
-        $this->assertEquals($query1, $query2);
+        //$this->assertEquals($query1, $query2);
 
 
-        /* where 和 match 并存*/
-        $es = new ES;
-        $es->where("price", ">=", 10)
-           ->match("name", "es")
-		   ->where("age", ">=", 2);
-        $query1 = $es->to_query();
+        ///* where 和 match 并存*/
+        //$es = new ES;
+        //$es->where("price", ">=", 10)
+        //   ->match("name", "es")
+		//   ->where("age", ">=", 2);
+        //$query1 = $es->to_query();
 
-        $es = new ES;
-        $es->must(function($es) {
-            $es->where("price", ">=", 10);
-        });
-        $es->should(function($es) {
-            $es->match("name", "es");
-        });
-        $es->must(function($es) {
-            $es->where("age", ">=", 2);
-        });
-        $query2 = $es->to_query();
-        $this->assertEquals($query1, $query2);
-
-        /* where 和 match 并存*/
-        $es = new ES;
-        $es->match("name", "es")
-           ->where("age", ">", 10)
-		   ->match("title", "search");
-        $query1 = $es->to_query();
-
-        $es = new ES;
-        $es->should(function($es) {
-            $es->match("name", "es");
-            $es->match("title", "search");
-        });
-        $es->must(function($es) {
-            $es->where("age", ">", 10);
-        });
-        $query2 = $es->to_query();
-        $this->assertEquals($query1, $query2);
+        //$es = new ES;
+        //$es->must(function($es) {
+        //    $es->where("price", ">=", 10);
+        //});
+        //$es->must(function($es) {
+        //    $es->match("name", "es");
+        //});
+        //$es->must(function($es) {
+        //    $es->where("age", ">=", 2);
+        //});
+        //$query2 = $es->to_query();
+        //$this->assertEquals($query1, $query2);
 
 	}
 
@@ -225,6 +240,12 @@ class ESTest extends TestCase
                 $es->match("title", "es", 2);
                 $es->match("content", "es", 1);
             });
+            $es->nested("user.names", function($es) {
+                $es->should(function($es) {
+                    $es->match("title", "es", 3);
+                    $es->match("content", "es", 4);
+                });
+            });
             $es->match("content", "es", 1);
         });
         $this->assertEquals($es->to_query(),
@@ -241,6 +262,19 @@ class ESTest extends TestCase
                                 "$bool3" => [
                                     ["match" => ["title" => ["query" => "es", "boost" => 2]]],
                                     ["match" => ["content" => "es"]],
+                                ],
+                            ]],
+                            ["nested" => [
+                                "path" => "user.names",
+                                "query" => [
+                                    [
+                                        "bool" => [
+                                            "should" => [
+                                                ["match" => ["title" => ["query" => "es", "boost" => 3]]],
+                                                ["match" => ["content" => ["query" => "es", "boost" => 4]]],
+                                            ]
+                                        ]
+                                    ]
                                 ],
                             ]],
                             ["match" => ["content" => "es"]],
@@ -260,6 +294,16 @@ class ESTest extends TestCase
             $es->$bool3(function($es) {
                 $es->where("author", "in", ["awen", "king"]);
                 $es->where("publisher", "in", ["bbc", "acc"]);
+                $es->nested("companies", function($es) {
+                    $es->must(function($es) {
+                        $es->where("name", "in", ["comp1"]);
+                        $es->where("addr", "in", ["comp1"]);
+                        $es->should(function($es) {
+                            $es->where("name", "in", ["comp2"]);
+                            $es->where("addr", "in", ["comp3"]);
+                        });
+                    });
+                });
             });
             $es->where("age", ">", 5);
             $es->where("age", "<", 9);
@@ -273,6 +317,11 @@ class ESTest extends TestCase
             [
                 "filter" => [
                     "bool" => [
+                        "$bool2" => [
+                            ["exists" => ["field" => "weight"]],
+                            ["exists" => ["field" => "name"]],
+                            ["missing" => ["field" => "address"]],
+                        ],
                         "$bool1" => [
                             ["range" => ["price" => ["gte" => 2]]],
                             ["range" => ["price" => ["lte" => 10]]],
@@ -280,15 +329,27 @@ class ESTest extends TestCase
                                 "$bool3" => [
                                     ["terms" => ["author" => ["awen", "king"]]],
                                     ["terms" => ["publisher" => ["bbc", "acc"]]],
+                                    ["nested" => [
+                                        "path" => "companies",
+                                        "filter" => [
+                                            ["bool" => [
+                                                "must" =>[
+                                                    ["terms" => ["name" => ["comp1"]]],
+                                                    ["terms" => ["addr" => ["comp1"]]],
+                                                    ["bool" => [
+                                                        "should" => [
+                                                            ["terms" => ["name" => ["comp2"]]],
+                                                            ["terms" => ["addr" => ["comp3"]]],
+                                                        ],
+                                                    ]],
+                                                ],
+                                            ]]
+                                        ],
+                                    ]],
                                 ],
                             ]],
                             ["range" => ["age" => ["gt" => 5]]],
                             ["range" => ["age" => ["lt" => 9]]],
-                        ],
-                        "$bool2" => [
-                            ["exists" => ["field" => "weight"]],
-                            ["exists" => ["field" => "name"]],
-                            ["missing" => ["field" => "address"]],
                         ],
                     ]
                 ]
