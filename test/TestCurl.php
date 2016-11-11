@@ -133,7 +133,9 @@ class ESTestCurl extends TestCase
         $es->drop_index();
         $es->create();
         $es->mapping(["fortest" => [
-            "detail" => "nested"
+            "detail" => "nested",
+            "list.inside" => "nested",
+            "list.inside.width" => "long",
         ]]);
 		$data = [
             ["id" => 1, "name" => "awen", "age" => 2, "detail" => [
@@ -151,9 +153,38 @@ class ESTestCurl extends TestCase
                 ["addr" => "china", "code" => 311],
                 ["addr" => "china", "code" => 312],
             ]],
+
+            ["id" => 3, "name" => "awen1", "age" => 25, "list" => [
+                "inside" => [[
+                    ["width" => 123, "code" => 311],
+                    ["width" => 156, "code" => 312],
+                ]],
+            ]],
+            ["id" => 3, "name" => "awen2", "age" => 25, "list" => [
+                "inside" => [
+                    ["width" => 223, "code" => 411],
+                    ["width" => 256, "code" => 412],
+                ],
+            ]],
 		];
 		$es->type("fortest")->bulk_upsert($data, ["id", "name"]);
         sleep(1);
+
+        /* deep nested */
+        $es->type("fortest")
+           ->select("list.inside.code as code", "id")
+           ->nested("list.inside", function($es) {
+               $es->must(function($es) {
+                   $es->where("list.inside.width", ">=", 200);
+               });
+           });
+        print_r(json_encode($es->to_query()));
+        $count = $es->count();
+        $data = $es->search();
+        print_r($data);
+        die;
+        $this->assertEquals($count, 1);
+        $this->assertEquals($data, [["411", 3], ["412", 3]]);
 
         $es->type("fortest")
             ->select("id", "name", "detail.addr as myaddr")

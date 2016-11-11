@@ -258,8 +258,8 @@ class ES
             foreach ($mappings as $type => $map) {
                 $properties = [];
                 foreach ($map as $field => $data_type) {
-                    $this->put_deep_element(
-                        $properties['properties'],
+                    $this->put_deep_properties(
+                        $properties,
                         explode('.', $field), 
                         $this->get_type_mapping($data_type)
                     );
@@ -835,15 +835,17 @@ class ES
     {
         $return = [];
         if (isset($data['hits']['hits'])) {
-            $hits = [];
-            foreach ($data['hits']['hits'] as $d) {
-                $d_sources = $this->unpack_nested_data($d['_source']);
-                foreach ($d_sources as $source) {
-                    $d['_source'] = $source;
-                    $hits[] = $d;
+            if (!empty($this->nested_path)) {
+                $hits = [];
+                foreach ($data['hits']['hits'] as $d) {
+                    $d_sources = $this->unpack_nested_data($d['_source']);
+                    foreach ($d_sources as $source) {
+                        $d['_source'] = $source;
+                        $hits[] = $d;
+                    }
                 }
+                $data['hits']['hits'] = $hits;
             }
-            $data['hits']['hits'] = $hits;
             foreach ($data['hits']['hits'] as $d) {
                 $row = $d['_source'];
 
@@ -993,16 +995,16 @@ class ES
         return implode(".", $_id);
     }
 
-    private function put_deep_element(&$array, array $keys, $val)
+    private function put_deep_properties(&$array, array $keys, $val)
     {
         $k = array_shift($keys);
-        if (!isset($array[$k])) {
-            $array[$k] = [];
+        if (!isset($array['properties'][$k])) {
+            $array['properties'][$k] = [];
         }
         if (empty($keys)) {
-            $array[$k] = $val;
+            $array['properties'][$k] = $val;
         } else {
-            $this->put_deep_element($array[$k], $keys, $val);
+            $this->put_deep_properties($array['properties'][$k], $keys, $val);
         }
     }
 
