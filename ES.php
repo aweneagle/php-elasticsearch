@@ -58,6 +58,7 @@ class ES
     private $from = 0;   //默认从第一条开始
 
     private $_source = [];    //需要选取的字段
+    private $fields_to_user = [];  //需要返回给调用者的字段
     private $meta = [];       //需要选取的元字段, 例如 _id, _score, _source 等
     private $no_select = true;
 
@@ -78,7 +79,6 @@ class ES
     private $status = null;
     private $nested_path = [];
     /* 这些key不返回给user */
-    private $no_return_fields = [];
 
 
     public function __construct($conf = null)
@@ -178,7 +178,7 @@ class ES
                     $this->meta[$field][] = $alias;
                 } else {
                     $this->_source[$field][] = $alias;
-                    unset($this->no_return_fields[$field]);
+                    $this->fields_to_user[$field] = 1;
                 }
             }
         }
@@ -504,10 +504,8 @@ class ES
             $this->set_nested($nested_path, "where", ["op" => $op, "val" => $value, "field" => $nested_field]);
 
             /* _source[] 为空 或者 _source[] 中有该字段时，需要返回给调用者 */
-            if (!empty($this->_source) && !isset($this->_source[$field])) {
-                $this->no_return_fields[$field] = true;
-            } else {
-                unset($this->no_return_fields[$field]);
+            if (!isset($this->_source[$field])) {
+                $this->_source[$field][] = $field;
             }
         }
         $this->switch_to_context("filter");
@@ -668,9 +666,6 @@ class ES
         }
         if (!empty($this->_source)) {
             $query['_source'] = array_keys($this->_source);
-            if ($this->no_return_fields) {
-                $query['_source'] = array_merge($query['_source'], array_keys($this->no_return_fields));
-            }
         }
         return $query;
     }
@@ -872,7 +867,7 @@ class ES
                     foreach ($this->_source as $key => $alias) {
                         $val = $this->fetch_deep_element($d['_source'], explode(".", $key));
                         foreach ($alias as $rename) {
-                            if (!isset($this->no_return_fields[$key])) {
+                            if (isset($this->fields_to_user[$key])) {
                                 $new_row[$rename] = $val;
                             }
                         }
