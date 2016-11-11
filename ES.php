@@ -883,11 +883,11 @@ class ES
     {
         $key = array_shift($key_chain);
         if (!isset($source[$key])) {
-            return false;
+            return null;
         } elseif (empty($key_chain)) {
             return $source[$key];
         } elseif (!is_array($source[$key])) {
-            return false;
+            return null;
         } else {
             return $this->fetch_deep_element($source[$key], $key_chain);
         }

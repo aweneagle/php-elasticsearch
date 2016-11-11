@@ -154,18 +154,18 @@ class ESTestCurl extends TestCase
                 ["addr" => "china", "code" => 312],
             ]],
 
-            ["id" => 3, "name" => "awen1", "age" => 25, "list" => [
-                "inside" => [[
-                    ["width" => 123, "code" => 311],
-                    ["width" => 156, "code" => 312],
-                ]],
-            ]],
-            ["id" => 3, "name" => "awen2", "age" => 25, "list" => [
-                "inside" => [
-                    ["width" => 223, "code" => 411],
-                    ["width" => 256, "code" => 412],
-                ],
-            ]],
+            //["id" => 3, "name" => "awen1", "age" => 25, "list" => [
+            //    "inside" => [[
+            //        ["width" => 123, "code" => 311],
+            //        ["width" => 156, "code" => 312],
+            //    ]],
+            //]],
+            //["id" => 3, "name" => "awen2", "age" => 25, "list" => [
+            //    "inside" => [
+            //        ["width" => 223, "code" => 411],
+            //        ["width" => 256, "code" => 412],
+            //    ],
+            //]],
 		];
 		$es->type("fortest")->bulk_upsert($data, ["id", "name"]);
         sleep(1);
