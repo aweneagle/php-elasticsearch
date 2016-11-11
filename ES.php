@@ -611,7 +611,7 @@ class ES
      */
     public function sort($field, $order = "desc")
     {
-        $this->sort[] = [$field => ["order" => $order]];
+        $this->sort[] = [$field => ["order" => strtolower($order)]];
         return $this;
     }
 
