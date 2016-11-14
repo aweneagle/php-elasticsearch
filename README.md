@@ -111,6 +111,7 @@ $es->nested("tags", function($es) {
 	$es->where("tags.name", "=", "tech");
 	$es->where("tags.type", "=", "2");
 });
+```
 
 7. 使用别名功能
 ```php
