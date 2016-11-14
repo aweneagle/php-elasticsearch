@@ -117,3 +117,4 @@ $es->nested("tags", function($es) {
 $es = new ES;
 $es->index("fortest_v1")->alias("fortest");  //给fortest_v1创建别名fortest
 $es->index("fortest")->re_alias("fortest_v1", "fortest_v2"); //将别名fortest 从 fortest_v1 移除，指向 fortest_v2
+```
