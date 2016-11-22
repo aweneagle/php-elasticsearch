@@ -48,6 +48,8 @@ class ES
     public $port = 9200;
     public $timeout_ms = 0;    //curl函数超时时间，单位是毫秒, <= 0 表示不超时
     public $conntimeout_ms = 0;    //连接超时时间，单位是毫秒, <= 0 表示不超时
+    public $user = null;
+    public $pass = null;
 
     private $error = null;
 
@@ -283,6 +285,25 @@ class ES
     }
 
     /*
+     * re_alias() 重定向索引
+     *
+     * @param  $from_index,  原索引
+     * @param  $to_index,  重新定向后的索引
+     */
+    public function re_alias($from_index, $to_index)
+    {
+        $url = $this->build_url("_aliases");
+        $post_fields = [
+            "actions" => [
+                ["remove" => ["index" => $from_index, "alias" => $this->index]],
+                ["add" => ["index" => $to_index, "alias" => $this->index]],
+            ],
+        ];
+        $res = $this->curl($url, "POST", json_encode($post_fields));
+        return $this->is_ok($res);
+    }
+
+    /*
      * alias() 创建别名
      *
      * @param   $alias, string, 别名
@@ -294,13 +315,7 @@ class ES
         if ($res === false) {
             return false;
         }
-        $res = json_decode($res, true);
-        if (isset($res['error'])) {
-            $this->set_error(json_encode($res['error']));
-            return false;
-        } else {
-            return true;
-        }
+        return $this->is_ok($res);
     }
 
 
@@ -314,16 +329,7 @@ class ES
         $url = $this->build_url("_count");
         $post_fields = $this->build_query($query);
         $data = $this->curl($url, "GET", $post_fields);
-        if ($data === false) {
-            return false;
-        }
-        $res = json_decode($data, true);
-        if (!$data) {
-            $this->set_error("wrong data:" . $data);
-            return false;
-        }
-        if (isset($res['error'])) {
-            $this->set_error("error:" . json_encode($res['error']));
+        if (!$this->is_ok($data, $res)) {
             return false;
         }
         return $res['count'];
@@ -339,14 +345,38 @@ class ES
     {
         $url = $this->build_url("_search");
         $post_fields = $this->build_query($query);
-        $data = $this->curl($url, "GET", $post_fields);
-        if ($data === false) {
+        $res = $this->curl($url, "GET", $post_fields);
+        if (!$this->is_ok($res, $data)) {
             return false;
         }
-        $data = json_decode($data, true);
         return $this->format_output($data);
     }
 
+    /*
+     * bulk_upsert() 批量更新文档
+     *
+     * @return false, 更新失败； ["update" => [ids], "failed" => [ids]]  更新成功（部分可能会失败）
+     */
+    public function bulk_update(array $data, $_id)
+    {
+        if (is_string($_id)) {
+            $_id = [$_id];
+        }
+        $url = $this->build_url("_bulk");
+        $result = $this->curl($url, "POST", $this->build_bulk_body($data, "update", $_id));
+        if ($result === false) {
+            return false;
+        }
+
+        $result = json_decode($result, true);
+        $update_succ = $failed = [];
+        $update_succ = $this->fetch_result($result, "update", 200);
+        $failed = $this->fetch_result($result, "update", 200, false);
+        return [
+            "update" => $update_succ,
+            "failed" => $failed,
+        ];
+    }
 
     /*
      * bulk_upsert 批量插入数据
@@ -359,16 +389,17 @@ class ES
         if (is_string($_id)) {
             $_id = [$_id];
         }
-        $url = "http://" . $this->host . ":" . $this->port . "/_bulk";
-        //$index_res = $this->curl($url, "POST", $this->build_bulk_body($data, "index", $_id));
+        $url = $this->build_url("_bulk");
         $result = $this->curl($url, "POST", $this->build_bulk_body($data, "update", $_id));
-        $result = json_decode($result, true);
+        if ($result === false) {
+            $result = [];
+        } else {
+            $result = json_decode($result, true);
+        }
 
         $update_succ = $create_succ = $failed = [];
-
         $update_succ = $this->fetch_result($result, "update", 200);
-
-        if ($result['errors'] == 1) {
+        if (isset($result['errors']) && $result['errors'] == 1) {
             $update_failed = $this->fetch_result($result, "update", 200, false);
             $update_failed = array_flip($update_failed);
             foreach ($data as $d) {
@@ -379,8 +410,11 @@ class ES
             }
 
             $result = $this->curl($url, "POST", $this->build_bulk_body($update_failed, "create", $_id));
-            $result = json_decode($result, true);
-
+            if ($result === false) {
+                $result = [];
+            } else {
+                $result = json_decode($result, true);
+            }
             $create_succ = $this->fetch_result($result, "create", 201);
             if ($result['errors'] == 1) {
                 $failed = $this->fetch_result($result, "create", 201, false);
@@ -474,19 +508,6 @@ class ES
         return $this;
     }
 
-    private function parse_nested_path($field)
-    {
-        foreach ($this->nested_path as $path => $null) {
-            if (strpos($field, $path) === 0) {
-                return [
-                    "path" => $path,
-                    "field" => substr($field, strlen($path) + 1)
-                ];
-            }
-        }
-        return false;
-    }
-
     /*
      * where() 对应 ES 的term, range, 和 terms语句
      *      $op = "=",  对应 term, 注意当字段是个多值字段时，term的意思将变成“包含”而不是“等于”
@@ -512,47 +533,47 @@ class ES
         $this->wrap_bool("must");
         $filter = [];
         switch ($op) {
-        case "=":
-            $filter["term"] = [$field => $value];
-            break;
+            case "=":
+                $filter["term"] = [$field => $value];
+                break;
 
-        case "in":
-            if (!is_array($value)) {
-                throw new \Exception(" 'in' operation should use an array as 'value'");
-            }
-            $filter["terms"] = [$field => $value];
-            break;
+            case "in":
+                if (!is_array($value)) {
+                    throw new \Exception(" 'in' operation should use an array as 'value'");
+                }
+                $filter["terms"] = [$field => $value];
+                break;
 
-        case ">=":
-            if (!is_numeric($value)) {
-                throw new \Exception(" '>=' operation should use number as 'value'");
-            }
-            $filter["range"] = [$field => ["gte" => $value]];
-            break;
+            case ">=":
+                if (!is_numeric($value)) {
+                    throw new \Exception(" '>=' operation should use number as 'value'");
+                }
+                $filter["range"] = [$field => ["gte" => $value]];
+                break;
 
-        case "<=":
-            if (!is_numeric($value)) {
-                throw new \Exception(" '<=' operation should use number as 'value'");
-            }
-            $filter["range"] = [$field => ["lte" => $value]];
-            break;
+            case "<=":
+                if (!is_numeric($value)) {
+                    throw new \Exception(" '<=' operation should use number as 'value'");
+                }
+                $filter["range"] = [$field => ["lte" => $value]];
+                break;
 
-        case "<":
-            if (!is_numeric($value)) {
-                throw new \Exception(" '<' operation should use number as 'value'");
-            }
-            $filter["range"] = [$field => ["lt" => $value]];
-            break;
+            case "<":
+                if (!is_numeric($value)) {
+                    throw new \Exception(" '<' operation should use number as 'value'");
+                }
+                $filter["range"] = [$field => ["lt" => $value]];
+                break;
 
-        case ">":
-            if (!is_numeric($value)) {
-                throw new \Exception(" '>' operation should use number as 'value'");
-            }
-            $filter["range"] = [$field => ["gt" => $value]];
-            break;
+            case ">":
+                if (!is_numeric($value)) {
+                    throw new \Exception(" '>' operation should use number as 'value'");
+                }
+                $filter["range"] = [$field => ["gt" => $value]];
+                break;
 
-        default :
-            throw new \Exception(" unknown operation '$op'");
+            default :
+                throw new \Exception(" unknown operation '$op'");
 
         }
         $this->curr_bool[] = $filter;
@@ -723,13 +744,13 @@ class ES
     {
         $method = strtoupper($method);
         switch ($method) {
-        case "POST":
-            $curl_options[CURLOPT_POST] = 1;
-            break;
+            case "POST":
+                $curl_options[CURLOPT_POST] = 1;
+                break;
 
-        default:
-            $curl_options[CURLOPT_CUSTOMREQUEST] = $method;
-            break;
+            default:
+                $curl_options[CURLOPT_CUSTOMREQUEST] = $method;
+                break;
         }
     }
 
@@ -784,18 +805,18 @@ class ES
         $val = $element[$field];
 
         switch ($where_op['op']) {
-        case '=':
-            return $val == $where_op['val'];
-        case 'in':
-            return in_array($val, $where_op['val']);
-        case '>':
-            return $val > $where_op['val'];
-        case '<':
-            return $val < $where_op['val'];
-        case '>=':
-            return $val >= $where_op['val'];
-        case '<=':
-            return $val <= $where_op['val'];
+            case '=':
+                return $val == $where_op['val'];
+            case 'in':
+                return in_array($val, $where_op['val']);
+            case '>':
+                return $val > $where_op['val'];
+            case '<':
+                return $val < $where_op['val'];
+            case '>=':
+                return $val >= $where_op['val'];
+            case '<=':
+                return $val <= $where_op['val'];
         }
         return false;
     }
@@ -813,11 +834,11 @@ class ES
             $this->nested_path[$path] = [];
         }
         switch ($tag) {
-        case "where":
-            $this->nested_path[$path]['where'][] = $op;
-            break;
-        default:
-            break;
+            case "where":
+                $this->nested_path[$path]['where'][] = $op;
+                break;
+            default:
+                break;
         }
     }
 
@@ -912,6 +933,14 @@ class ES
         if ($this->type) {
             $path .= $this->type . "/";
         }
+        $user = '';
+        if ($this->user) {
+            $user = $this->user;
+            if ($this->pass) {
+                $user .= ":" . $this->pass;
+            }
+            $user .= "@";
+        }
 
         $get = [];
         if ($this->size) {
@@ -921,32 +950,38 @@ class ES
             $get['from'] = $this->from;
         }
 
-        $head = "http://" . $this->host . ":" . $this->port . "/" ;
+        $head = "http://" . $user .  $this->host . ":" . $this->port . "/" ;
         switch ($operation) {
-        case "":
-            return $head . $this->index;
+            case "":
+                return $head . $this->index;
 
-        case "_bulk":
-            return $head . $operation;
+            case "_bulk":
+            case "_aliases":
+                return $head . $operation;
 
-        case "_mapping":
-        case "_alias":
-            return $head . $this->index . "/" . $operation;
+            case "_mapping":
+            case "_alias":
+                return $head . $this->index . "/" . $operation;
 
-        case "_count":
-        case "_search":
-            return $head . $path . $operation . "?" . http_build_query($get);
+            case "_count":
+            case "_search":
+                return $head . $path . $operation . "?" . http_build_query($get);
         }
     }
 
     private function fetch_result(array $result, $operation, $code, $equal = true)
     {
         $return = [];
-        if (isset($result['error'])) {
-            $this->set_error(json_encode($result));
+        if (isset($result['error']) || !isset($result['items'])) {
+            if (isset($result['error'])) {
+                $this->set_error(json_encode($result['error']));
+            }
             return $return;
         }
         foreach ($result['items'] as $r) {
+            if (isset($r[$operation]['error'])) {
+                $this->set_error(json_encode($r));
+            }
             if ($equal) {
                 $check = ($r[$operation]['status'] == $code);
             } else {
@@ -1006,23 +1041,23 @@ class ES
     private function get_type_mapping($data_type)
     {
         switch ($data_type) {
-        case 'string':
-            return ["type" => "string", "index" => "not_analyzed"];
+            case 'string':
+                return ["type" => "string", "index" => "not_analyzed"];
 
-        case 'long':
-            return ['type' => 'long'];
+            case 'long':
+                return ['type' => 'long'];
 
-        case 'integer':
-            return ['type' => 'integer'];
+            case 'integer':
+                return ['type' => 'integer'];
 
-        case 'bool':
-            return ['type' => 'bool'];
+            case 'bool':
+                return ['type' => 'bool'];
 
-        case 'nested':
-            return ['type' => 'nested'];
+            case 'nested':
+                return ['type' => 'nested'];
 
-        default:
-            return $data_type;
+            default:
+                return $data_type;
         }
     }
 
@@ -1037,16 +1072,16 @@ class ES
         
         if (empty($this->bool_stack)) {
             switch ($this->context) {
-            case "query":
-                $this->query = $this->merge_bool($query[0], $this->query);
-                break;
+                case "query":
+                    $this->query = $this->merge_bool($query[0], $this->query);
+                    break;
 
-            case "filter":
-                $this->filter = $this->merge_bool($query[0], $this->filter);
-                break;
+                case "filter":
+                    $this->filter = $this->merge_bool($query[0], $this->filter);
+                    break;
 
-            default:
-                throw new \Exception("wrong context : '{$this->context}'");
+                default:
+                    throw new \Exception("wrong context : '{$this->context}'");
             }
             $this->curr_bool = [];
         } else {
@@ -1086,14 +1121,14 @@ class ES
     private function switch_to_context($context)
     {
         switch ($this->context) {
-        case null:
-            $this->context = $context;
-            break;
+            case null:
+                $this->context = $context;
+                break;
 
-        case "query":
-        case "filter":
-            $this->context = $context;
-            break;
+            case "query":
+            case "filter":
+                $this->context = $context;
+                break;
         }
     }
 
@@ -1111,5 +1146,38 @@ class ES
             ]
         ];
         $this->pop_bool($query);
+    }
+
+    private function is_ok($curl_result, &$data = null)
+    {
+        if ($curl_result === false) {
+            return false;
+        }
+        $res = json_decode($curl_result, true);
+        if (!is_array($res)) {
+            $this->set_error($curl_result);
+            return false;
+        }
+        if (isset($res['error'])) {
+            $this->set_error($curl_result);
+            return false;
+        } else {
+            $data = $res;
+            return true;
+        }
+    }
+
+
+    private function parse_nested_path($field)
+    {
+        foreach ($this->nested_path as $path => $null) {
+            if (strpos($field, $path) === 0) {
+                return [
+                    "path" => $path,
+                    "field" => substr($field, strlen($path) + 1)
+                ];
+            }
+        }
+        return false;
     }
 }
