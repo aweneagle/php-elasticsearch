@@ -7,6 +7,7 @@ class ESTest extends TestCase
 	public function testDefault()
 	{
         /* nested query */
+        /*
         $es = new ES;
         $query = $es->nested("names", function($es) {
             $es->should(function($es) {
@@ -54,6 +55,7 @@ class ESTest extends TestCase
                 ],
             ],
         ]);
+         */
 
         $es = new ES;
 		$query = $es->to_query();
@@ -314,7 +316,7 @@ class ESTest extends TestCase
             $es->exists("address", false);
         });
         $this->assertEquals($es->to_query(),
-            [
+            [ "query" => ["filtered" => [
                 "filter" => [
                     "bool" => [
                         "$bool2" => [
@@ -353,7 +355,7 @@ class ESTest extends TestCase
                         ],
                     ]
                 ]
-            ]
+            ]]]
         );
     }
 
@@ -413,7 +415,7 @@ class ESTest extends TestCase
 			$es->where("price", ">", 12);
 			$es->where("price", "<", 22);
 		});
-		$compare = [
+		$compare = [ "query" => ["filtered" => [
 			"filter" => [
 				"bool" => [
 					"$bool" => [
@@ -424,7 +426,7 @@ class ESTest extends TestCase
 					],
 				],
 			],
-		];
+		]]];
 		$this->assertEquals($es->to_query(), $compare);
 	}
 

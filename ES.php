@@ -353,7 +353,7 @@ class ES
     }
 
     /*
-     * bulk_upsert() 批量更新文档
+     * bulk_update() 批量更新文档
      *
      * @return false, 更新失败； ["update" => [ids], "failed" => [ids]]  更新成功（部分可能会失败）
      */
@@ -655,33 +655,33 @@ class ES
             $this->unwrap_bool();
         }
 
-        $query = [];
-        if (!empty($this->query)) {
-            if (!empty($this->filter)) {
-                $query = [
-                    "query" => [
-                        "filtered" => [
-                            "query" => $this->query,
-                            "filter" => $this->filter,
-                        ],
-                    ]
-                ];
-            } else {
-                $query = [
-                    "query" => $this->query
-                ];
-            }
+        if (empty($this->query) && empty($this->filter)) {
+            $query = [
+                "query" => ["match_all" => []]
+            ];
+        } elseif (empty($this->filter)) {
+            $query = [
+                "query" => $this->query
+            ];
+        } elseif (empty($this->query)) {
+            $query = [
+                "query" => [
+                    "filtered" => [
+                        "filter" => $this->filter,
+                    ],
+                ]
+            ];
         } else {
-            if (!empty($this->filter)) {
-                $query = [
-                    "filter" => $this->filter,
-                ];
-            } else {
-                $query = [
-                    "query" => ["match_all" => []]
-                ];
-            }
+            $query = [
+                "query" => [
+                    "filtered" => [
+                        "query" => $this->query,
+                        "filter" => $this->filter,
+                    ],
+                ]
+            ];
         }
+
         if (!empty($this->sort)) {
             $query['sort'] = $this->sort;
         }
