@@ -50,6 +50,7 @@ class ES
     public $conntimeout_ms = 0;    //连接超时时间，单位是毫秒, <= 0 表示不超时
     public $user = null;
     public $pass = null;
+    public $retry_num = 3;  //重试次数
 
     private $error = null;
 
@@ -58,6 +59,9 @@ class ES
 
     private $size = 0;  //分页大小, 默认不设置
     private $from = 0;   //默认从第一条开始
+
+    private $scroll_id = null;
+    private $scroll_maxtime = '1m';
 
     private $_source = [];    //需要选取的字段
     private $fields_to_user = [];  //需要返回给调用者的字段
@@ -90,6 +94,14 @@ class ES
             $this->port = $conf['port'];
             $this->index = $conf['index'];
         }
+    }
+
+    /*
+     * get_type_name() 获取type名
+     */
+    public function get_type_name()
+    {
+        return $this->type;
     }
 
     /* 
@@ -206,24 +218,35 @@ class ES
     }
 
     /*
+     * delete()  删除索引
+     */
+    public function delete()
+    {
+        $res = $this->curl($this->build_url(""), "DELETE");
+        if (!$this->is_ok($res, $data)) {
+            return false;
+        }
+        return $data;
+    }
+
+    /*
      * create()  创建索引
      */
-    public function create($mappings = []) {
+    public function create(array $settings = []) {
         $url = $this->build_url("");
-        $res = $this->curl($url, "PUT");
-        if ($res === false) {
-            return false;
+        $post = [];
+        if ($settings) {
+            $post['settings'] = $settings;
         }
-        $res = json_decode($res, true);
-        if (isset($res['error'])) {
-            $this->set_error(json_encode($res));
-            $this->status = $res['status'];
-            return false;
+        if (!empty($post)) {
+            $res = $this->curl($url, "PUT", json_encode($post));
         } else {
-            $this->status = 200;
+            $res = $this->curl($url, "PUT");
         }
-
-        return $res;
+        if (!$this->is_ok($res, $data)) {
+            return false;
+        }
+        return $data;
     }
 
     /*
@@ -233,19 +256,80 @@ class ES
     {
         $url = $this->build_url("");
         $res = $this->curl($url, "DELETE");
-        if ($res === false) {
+        if (!$this->is_ok($res, $data)) {
             return false;
         }
-        $res = json_decode($res, true);
-        if (isset($res['error'])) {
-            $this->set_error(json_encode($res));
-            $this->status = $res['status'];
-            return false;
-        } else {
-            $this->status = 200;
-        }
-        return $res;
+        return $data;
     }
+
+    /*
+     * settings() 获取/设置 settings
+     *
+     * @param   $settings, 需要设置的settings
+     * @return  $settings
+     */
+    public function settings(array $settings = [])
+    {
+        $url = $this->build_url("_settings");
+        if ($settings) {
+            $this->curl($url . "/", "PUT", json_encode($settings));
+        }
+        $res = $this->curl($url, "GET");
+        if (!$this->is_ok($res, $data)) {
+            return false;
+        }
+        return $data;
+    }
+
+    /*
+     * health() 获取集群的健康情况
+     * 
+     * @return  false, 获取失败；array 
+     */
+    public function health($only_this_index = true)
+    {
+        $url = $this->build_url("_cluster") . "/health";
+        if ($only_this_index) {
+            $url .= "/" . $this->index . "?level=indices";
+        }
+        $res = $this->curl($url, "GET");
+        if (!$this->is_ok($res, $data)) {
+            return false;
+        }
+        return $data;
+    }
+
+    /*
+     * info() 获取当前索引的信息
+     *
+     * @return  false, 获取失败； array 当前索引的信息
+     */
+    public function info()
+    {
+        $url = $this->build_url("");
+        $res = $this->curl($url, "GET");
+        if (!$this->is_ok($res, $data)) {
+            return false;
+        }
+        return $data;
+    }
+
+    /*
+     * set_row_mappings() 设置原始格式的mapping
+     *
+     * @return false,  设置失败  
+     */
+    public function set_row_mapping(array $mappings)
+    {
+        $url = $this->build_url("_mapping");
+        $this->curl($url . "/" . $this->type, "PUT", json_encode($mappings));
+        $res = $this->curl($url, "GET");
+        if (!$this->is_ok($res, $data)) {
+            return false;
+        }
+        return $data;
+    }
+
 
     /*
      * mapping() 获取/设置 mapping
@@ -270,18 +354,10 @@ class ES
             }
         }
         $res = $this->curl($url, "GET");
-        if ($res === false) {
+        if (!$this->is_ok($res, $data)) {
             return false;
         }
-        $res = json_decode($res, true);
-        if (isset($res['status'])) {
-            $this->status = $res['status'];
-            $this->set_error(json_encode($res));
-            return false;
-        } else {
-            $this->status = 200;
-        }
-        return $res;
+        return $data;
     }
 
     /*
@@ -335,16 +411,57 @@ class ES
         return $res['count'];
     }
 
+    /*
+     * scroll_maxtime() 滚屏时，每批文档搜索的超时时间
+     *
+     * @param   $max_time,   1m, 1h, 1s, 1d  见文档:https://www.elastic.co/guide/en/elasticsearch/reference/current/common-options.html#time-units
+     */
+    public function scroll_maxtime($max_time)
+    {
+        $this->scroll_maxtime = $max_time;
+        return $this;
+    }
+
+    /*
+     * scroll() 滚屏接口
+     *
+     * @param   $size,   每一批返回的文档数， 这里可以超过 _search 的最大值 10000
+     */
+    public function scroll($size)
+    {
+
+        if (!$this->scroll_id) {
+            $url = $this->build_url("scroll_search");
+            $post_fields = $this->build_query(null, false);
+            $post_fields['size'] = intval($size);
+
+        } else {
+            $url = $this->build_url("scroll");
+            $post_fields = [
+                'scroll_id' => $this->scroll_id,
+                'scroll' => $this->scroll_maxtime,
+            ];
+        }
+        $post_fields = json_encode($post_fields);
+
+        $res = $this->curl($url, "GET", $post_fields);
+        if (!$this->is_ok($res, $data)) {
+            return false;
+        }
+        $this->scroll_id = $data['_scroll_id'];
+        return $this->format_output($data);
+    }
+
 
     /* 
      * search() 查询文档
      *
      * @return false, 查询语句或者数据访问有错误, 调用 error() 查看； 成功返回数组, 如果没有被匹配到，返回 []
      */
-    public function search($query = null)
+    public function search()
     {
         $url = $this->build_url("_search");
-        $post_fields = $this->build_query($query);
+        $post_fields = $this->build_query(null);
         $res = $this->curl($url, "GET", $post_fields);
         if (!$this->is_ok($res, $data)) {
             return false;
@@ -374,6 +491,33 @@ class ES
         $failed = $this->fetch_result($result, "update", 200, false);
         return [
             "update" => $update_succ,
+            "failed" => $failed,
+        ];
+    }
+
+    /*
+     * bulk_delete() 批量删除文档
+     *
+     * @return false, 更新失败; ["delete" => [ids], "failed" => [ids]]  删除成功（部分可能失败）
+     */
+    public function bulk_delete(array $ids)
+    {
+        $url = $this->build_url("_bulk");
+        $data = [];
+        foreach ($ids as $id) {
+            $data[] = ["_id" => $id];
+        }
+        $result = $this->curl($url, "POST", $this->build_bulk_body($data, "delete", "_id"));
+        if ($result === false) {
+            return false;
+        }
+
+        $result = json_decode($result, true);
+        $update_succ = $failed = [];
+        $update_succ = $this->fetch_result($result, "delete", 200);
+        $failed = $this->fetch_result($result, "delete", 200, false);
+        return [
+            "delete" => $update_succ,
             "failed" => $failed,
         ];
     }
@@ -416,7 +560,7 @@ class ES
                 $result = json_decode($result, true);
             }
             $create_succ = $this->fetch_result($result, "create", 201);
-            if ($result['errors'] == 1) {
+            if (isset($result['errors'])) {
                 $failed = $this->fetch_result($result, "create", 201, false);
             }
         }
@@ -699,6 +843,8 @@ class ES
         $this->no_select = true;
         $this->from = $this->size = 0;
         $this->status = null;
+        $this->scroll_id = null;
+        $this->scroll_maxtime = '1m';
         $this->nested_path = $this->bool_stack = $this->curr_bool = [];
     }
 
@@ -721,6 +867,11 @@ class ES
         if ($conn_timeout_ms > 0) {
             $curl_options[CURLOPT_CONNECTTIMEOUT_MS] = $conn_timeout_ms;
         }
+
+        if ($this->user) {
+            $curl_options[CURLOPT_USERPWD] = $this->user . ":" . $this->pass;
+        }
+
         if ($timeout_ms > 0) {
             $curl_options[CURLOPT_TIMEOUT_MS] = $timeout_ms;
         }
@@ -729,7 +880,14 @@ class ES
             curl_close($ch);
             return false;
         }
-        $res = curl_exec($ch);
+        $res = false;
+        /* 如果是操作超时, 重试3次 (libcurl 没有 connect_timeout 的错误码，所以这里选择了一个最接近的 CURLE_OPERATION_TIMEDOUT */
+        for ($i = intval($this->retry_num); $i > 0 && $res === false; $i --) {
+            $res = curl_exec($ch);
+            if (curl_errno($ch) != CURLE_OPERATION_TIMEDOUT) {
+                break;
+            }
+        }
         if ($res === false) {
             $this->error = "failed curl_exec($url). error:" . curl_error($ch);
             curl_close($ch);
@@ -850,7 +1008,9 @@ class ES
     private function format_output($data)
     {
         $return = [];
+        $total = 0;
         if (isset($data['hits']['hits'])) {
+            $total = intval($data['hits']['total']);
             if (!empty($this->nested_path)) {
                 $hits = [];
                 foreach ($data['hits']['hits'] as $d) {
@@ -897,7 +1057,7 @@ class ES
                 $return[] = $new_row;
             }
         }
-        return $return;
+        return ['total' => $total, 'rows' => $return];
     }
 
     private function fetch_deep_element(array $source, array $key_chain)
@@ -914,14 +1074,18 @@ class ES
         }
     }
 
-    private function build_query($query)
+    private function build_query($query, $json_encode = true)
     {
         if ($query !== null) {
-            $post_fields = json_encode($query);
+            $post_fields = $query;
         } else {
-            $post_fields = json_encode($this->to_query());
+            $post_fields = $this->to_query();
         }
-        return $post_fields;
+        if ($json_encode) {
+            return json_encode($post_fields);
+        } else {
+            return $post_fields;
+        }
     }
 
     private function build_url($operation)
@@ -933,14 +1097,6 @@ class ES
         if ($this->type) {
             $path .= $this->type . "/";
         }
-        $user = '';
-        if ($this->user) {
-            $user = $this->user;
-            if ($this->pass) {
-                $user .= ":" . $this->pass;
-            }
-            $user .= "@";
-        }
 
         $get = [];
         if ($this->size) {
@@ -950,22 +1106,29 @@ class ES
             $get['from'] = $this->from;
         }
 
-        $head = "http://" . $user .  $this->host . ":" . $this->port . "/" ;
+        $head = "http://" . $this->host . ":" . $this->port . "/" ;
         switch ($operation) {
             case "":
                 return $head . $this->index;
 
             case "_bulk":
             case "_aliases":
+            case "_cluster":
                 return $head . $operation;
 
             case "_mapping":
+            case "_settings":
             case "_alias":
                 return $head . $this->index . "/" . $operation;
 
             case "_count":
             case "_search":
                 return $head . $path . $operation . "?" . http_build_query($get);
+
+            case "scroll":
+                return $head . "/_search/scroll";
+            case "scroll_search":
+                return $head . $path . "/_search?scroll=" . $this->scroll_maxtime;
         }
     }
 
@@ -997,6 +1160,10 @@ class ES
     private function build_bulk_body(array $data, $operation, $_id)
     {
         $body = [];
+        if (is_string($_id)) {
+            $_id = [$_id];
+        }
+
         foreach ($data as $d) {
             $row = $d;
             $d = [];
@@ -1006,8 +1173,10 @@ class ES
             $body[] = json_encode([$operation => $d]);
             if ($operation == "update") {
                 $body[] = json_encode(["doc" => $row]);
-            } else {
+            } elseif ($operation == "create") {
                 $body[] = json_encode($row);
+            } elseif ($operation == "delete") {
+                ;   //do nothing
             }
         }
         return implode("\n", $body) . "\n";
@@ -1018,7 +1187,7 @@ class ES
         $_id = [];
         foreach ($_id_union as $key) {
             if (!isset($row[$key])) {
-                throw new \Exception("unknown _id of document: '$key'");
+                throw new \Exception("unknown _id of document: '$key', row=" . json_encode($row));
             }
             $_id[] = $row[$key];
         }
@@ -1156,10 +1325,13 @@ class ES
         $res = json_decode($curl_result, true);
         if (!is_array($res)) {
             $this->set_error($curl_result);
+            $data = false;
             return false;
         }
         if (isset($res['error'])) {
             $this->set_error($curl_result);
+            $this->status = intval($res['status']);
+            $data = false;
             return false;
         } else {
             $data = $res;
